@@ -15,6 +15,8 @@ type Tone = "" | "warn" | "danger";
 const BACKEND_BASE_URL = "http://127.0.0.1:8000";
 const STATUS_ENDPOINT = `${BACKEND_BASE_URL}/api/status`;
 const VIDEO_ENDPOINT = `${BACKEND_BASE_URL}/api/video`;
+const REFERENCE_LINE_ENDPOINT = `${BACKEND_BASE_URL}/api/reference-line`;
+const REFERENCE_BASELINE_ENDPOINT = `${BACKEND_BASE_URL}/api/reference-baseline`;
 const STATUS_POLL_MS = 1000;
 const STREAM_RETRY_MS = 1200;
 
@@ -45,6 +47,23 @@ function fmt2(v: number | undefined) {
   return Number.isFinite(n) ? n.toFixed(2) : "0.00";
 }
 
+function fmtHms(date: Date) {
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function fmtUpdatedAt(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fmtHms(new Date());
+  }
+
+  // Accept both seconds and milliseconds timestamps.
+  const ms = value >= 1_000_000_000_000 ? value : value * 1000;
+  return fmtHms(new Date(ms));
+}
+
 export default function App() {
   const [posture, setPosture] = useState("unknown");
   const [personCount, setPersonCount] = useState<string>("-");
@@ -60,6 +79,17 @@ export default function App() {
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const [alertModalText, setAlertModalText] = useState("");
   const [beepMuted, setBeepMuted] = useState(false);
+  const [alertEnabled, setAlertEnabled] = useState(true);
+  const [refLineEnabled, setRefLineEnabled] = useState(false);
+  const [baselineForm, setBaselineForm] = useState({
+    x1: "100",
+    y1: "420",
+    x2: "520",
+    y2: "390",
+  });
+  const [baselineBusy, setBaselineBusy] = useState(false);
+  const [baselineNotice, setBaselineNotice] = useState("");
+  const [baselineError, setBaselineError] = useState("");
 
   const lastAlertSeqRef = useRef(0);
   const lastAlertFingerprintRef = useRef("");
@@ -69,7 +99,10 @@ export default function App() {
   const streamRetryTimerRef = useRef<number | null>(null);
 
   const tone = useMemo(() => badgeTone(posture), [posture]);
-  const isAlerting = useMemo(() => systemEnabled && isAlertPosture(posture), [posture, systemEnabled]);
+  const isAlerting = useMemo(
+    () => systemEnabled && alertEnabled && isAlertPosture(posture),
+    [posture, systemEnabled, alertEnabled],
+  );
 
   const notifyBrowser = async (nextPosture: string, message: string) => {
     if (!("Notification" in window)) return false;
@@ -163,6 +196,132 @@ export default function App() {
     }
   };
 
+  const loadBaselineConfig = async () => {
+    try {
+      setBaselineBusy(true);
+      setBaselineError("");
+      setBaselineNotice("");
+
+      const [lineRes, baseRes] = await Promise.all([
+        fetch(REFERENCE_LINE_ENDPOINT),
+        fetch(REFERENCE_BASELINE_ENDPOINT),
+      ]);
+      if (!lineRes.ok) throw new Error(`reference-line HTTP ${lineRes.status}`);
+      if (!baseRes.ok) throw new Error(`reference-baseline HTTP ${baseRes.status}`);
+
+      const lineData = (await lineRes.json()) as Record<string, unknown>;
+      const baseData = (await baseRes.json()) as Record<string, unknown>;
+
+      setRefLineEnabled(Boolean(lineData.enabled));
+
+      const fromRoot = baseData;
+      const manualObj =
+        typeof baseData.manual === "object" && baseData.manual !== null
+          ? (baseData.manual as Record<string, unknown>)
+          : null;
+      const source = manualObj ?? fromRoot;
+
+      const nextX1 = Number(source.x1);
+      const nextY1 = Number(source.y1);
+      const nextX2 = Number(source.x2);
+      const nextY2 = Number(source.y2);
+
+      if (
+        Number.isFinite(nextX1) &&
+        Number.isFinite(nextY1) &&
+        Number.isFinite(nextX2) &&
+        Number.isFinite(nextY2)
+      ) {
+        setBaselineForm({
+          x1: String(nextX1),
+          y1: String(nextY1),
+          x2: String(nextX2),
+          y2: String(nextY2),
+        });
+      }
+
+      setBaselineNotice("Loaded baseline config");
+    } catch (err) {
+      setBaselineError(err instanceof Error ? err.message : "Failed to load baseline config");
+    } finally {
+      setBaselineBusy(false);
+    }
+  };
+
+  const setReferenceLineMode = async (enabled: boolean) => {
+    try {
+      setBaselineBusy(true);
+      setBaselineError("");
+      setBaselineNotice("");
+
+      const res = await fetch(`${REFERENCE_LINE_ENDPOINT}?enabled=${enabled ? "true" : "false"}`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`reference-line HTTP ${res.status}`);
+
+      setRefLineEnabled(enabled);
+      setBaselineNotice(`Reference line ${enabled ? "enabled" : "disabled"}`);
+    } catch (err) {
+      setBaselineError(err instanceof Error ? err.message : "Failed to update reference line");
+    } finally {
+      setBaselineBusy(false);
+    }
+  };
+
+  const saveManualBaseline = async () => {
+    const x1 = Number(baselineForm.x1);
+    const y1 = Number(baselineForm.y1);
+    const x2 = Number(baselineForm.x2);
+    const y2 = Number(baselineForm.y2);
+
+    if (![x1, y1, x2, y2].every(Number.isFinite)) {
+      setBaselineError("Please enter valid numbers for x1 y1 x2 y2");
+      return;
+    }
+
+    try {
+      setBaselineBusy(true);
+      setBaselineError("");
+      setBaselineNotice("");
+
+      const query = new URLSearchParams({
+        x1: String(x1),
+        y1: String(y1),
+        x2: String(x2),
+        y2: String(y2),
+      });
+      const res = await fetch(`${REFERENCE_BASELINE_ENDPOINT}?${query.toString()}`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`reference-baseline HTTP ${res.status}`);
+
+      setBaselineNotice("Manual baseline saved");
+    } catch (err) {
+      setBaselineError(err instanceof Error ? err.message : "Failed to save baseline");
+    } finally {
+      setBaselineBusy(false);
+    }
+  };
+
+  const clearManualBaseline = async () => {
+    try {
+      setBaselineBusy(true);
+      setBaselineError("");
+      setBaselineNotice("");
+
+      const res = await fetch(REFERENCE_BASELINE_ENDPOINT, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error(`reference-baseline HTTP ${res.status}`);
+
+      setBaselineNotice("Manual baseline cleared");
+    } catch (err) {
+      setBaselineError(err instanceof Error ? err.message : "Failed to clear baseline");
+    } finally {
+      setBaselineBusy(false);
+    }
+  };
+
   const openSystem = () => {
     if (systemEnabled) return;
 
@@ -195,6 +354,21 @@ export default function App() {
     setStatusText("System is OFF");
     stopBeeping();
     clearStreamRetryTimer();
+  };
+
+  const toggleAlertEnabled = () => {
+    setAlertEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        setAlertModalOpen(false);
+        setBeepMuted(false);
+        stopBeeping();
+        setStatusText((prevStatus) => `${prevStatus} | alert disabled`);
+      } else {
+        setStatusText((prevStatus) => `${prevStatus} | alert enabled`);
+      }
+      return next;
+    });
   };
 
   const handleStreamError = () => {
@@ -243,6 +417,12 @@ export default function App() {
   }, [alertModalOpen]);
 
   useEffect(() => {
+    if (!alertModalOpen) return;
+    if (isAlertPosture(posture)) return;
+    closeAlertModal();
+  }, [posture, alertModalOpen]);
+
+  useEffect(() => {
     if (!systemEnabled) return;
 
     const pollStatus = async () => {
@@ -260,9 +440,7 @@ export default function App() {
         setConnected(true);
         setBackendUnavailable(false);
 
-        const updated = data.updated_at
-          ? new Date(data.updated_at * 1000).toLocaleTimeString()
-          : new Date().toLocaleTimeString();
+        const updated = fmtUpdatedAt(data.updated_at);
         setStatusText(`state=${String(data.message ?? "-")} | updated=${updated}`);
 
         setAlertMessage(data.alert_message ?? "");
@@ -284,7 +462,7 @@ export default function App() {
           }
         }
 
-        if (shouldNotify) {
+        if (shouldNotify && alertEnabled) {
           setAlertMessage(message);
           openAlertModal(message);
           const notified = await notifyBrowser(nextPosture, message);
@@ -308,6 +486,11 @@ export default function App() {
     return () => {
       window.clearInterval(interval);
     };
+  }, [systemEnabled, alertEnabled]);
+
+  useEffect(() => {
+    if (!systemEnabled) return;
+    void loadBaselineConfig();
   }, [systemEnabled]);
 
   useEffect(() => {
@@ -343,7 +526,7 @@ export default function App() {
 
       {backendUnavailable ? (
         <div className="backend-warning" role="alert">
-          Backend is unavailable. กรุณาเปิด backend server ที่ {BACKEND_BASE_URL}
+          Backend is unavailable. Please re-check backend server ที่ {BACKEND_BASE_URL}
         </div>
       ) : null}
 
@@ -384,16 +567,26 @@ export default function App() {
 
           <div className="video-actions">
             <button className="btn" onClick={openSystem} disabled={systemEnabled}>
-              เปิดระบบ
+              Start System
             </button>
             <button className="btn danger" onClick={closeSystem} disabled={!systemEnabled}>
-              ปิดระบบ
+              Close System
+            </button>
+            <button className={`btn ${alertEnabled ? "secondary" : "danger"}`} onClick={toggleAlertEnabled}>
+              {alertEnabled ? "Disable Alert" : "Enable Alert"}
             </button>
           </div>
 
-          <div className="system-state">
-            <span>System State</span>
-            <span className={`state ${systemEnabled ? "live" : ""}`}>{systemEnabled ? "RUNNING" : "OFF"}</span>
+          <div className="system-states">
+            <div className="system-state">
+              <span>System State</span>
+              <span className={`state ${systemEnabled ? "live" : ""}`}>{systemEnabled ? "RUNNING" : "OFF"}</span>
+            </div>
+
+            <div className="system-state">
+              <span>Alert State</span>
+              <span className={`state ${alertEnabled ? "live" : ""}`}>{alertEnabled ? "ENABLED" : "DISABLED"}</span>
+            </div>
           </div>
 
           {streamRetrying ? <div className="stream-warning">Video interrupted. Reconnecting...</div> : null}
@@ -408,7 +601,7 @@ export default function App() {
               onLoad={handleStreamLoad}
             />
           ) : (
-            <div className="video-off">System is OFF. Press เปิดระบบ to start stream.</div>
+            <div className="video-off">System is OFF. Please press Start stream.</div>
           )}
         </div>
 
@@ -436,6 +629,80 @@ export default function App() {
               <div className="k">Pose Score</div>
               <div className="v">{poseScore}</div>
             </div>
+          </div>
+
+          <div className="baseline-config">
+            <div className="baseline-title">Base Line Config</div>
+
+            <div className="baseline-row">
+              <button className="btn secondary" onClick={() => void loadBaselineConfig()} disabled={baselineBusy}>
+                Load
+              </button>
+              <button
+                className="btn secondary"
+                onClick={() => void setReferenceLineMode(true)}
+                disabled={baselineBusy || refLineEnabled}
+              >
+                Enable Ref Line
+              </button>
+              <button
+                className="btn secondary"
+                onClick={() => void setReferenceLineMode(false)}
+                disabled={baselineBusy || !refLineEnabled}
+              >
+                Disable Ref Line
+              </button>
+            </div>
+
+            <div className="baseline-grid">
+              <label className="baseline-field">
+                <span>x1</span>
+                <input
+                  value={baselineForm.x1}
+                  onChange={(event) => setBaselineForm((prev) => ({ ...prev, x1: event.target.value }))}
+                  inputMode="numeric"
+                />
+              </label>
+              <label className="baseline-field">
+                <span>y1</span>
+                <input
+                  value={baselineForm.y1}
+                  onChange={(event) => setBaselineForm((prev) => ({ ...prev, y1: event.target.value }))}
+                  inputMode="numeric"
+                />
+              </label>
+              <label className="baseline-field">
+                <span>x2</span>
+                <input
+                  value={baselineForm.x2}
+                  onChange={(event) => setBaselineForm((prev) => ({ ...prev, x2: event.target.value }))}
+                  inputMode="numeric"
+                />
+              </label>
+              <label className="baseline-field">
+                <span>y2</span>
+                <input
+                  value={baselineForm.y2}
+                  onChange={(event) => setBaselineForm((prev) => ({ ...prev, y2: event.target.value }))}
+                  inputMode="numeric"
+                />
+              </label>
+            </div>
+
+            <div className="baseline-row">
+              <button className="btn" onClick={() => void saveManualBaseline()} disabled={baselineBusy}>
+                Save Baseline
+              </button>
+              <button className="btn danger" onClick={() => void clearManualBaseline()} disabled={baselineBusy}>
+                Clear Baseline
+              </button>
+            </div>
+
+            <div className="baseline-hint">
+              reference-line: <strong>{refLineEnabled ? "ON" : "OFF"}</strong>
+            </div>
+            {baselineNotice ? <div className="baseline-note ok">{baselineNotice}</div> : null}
+            {baselineError ? <div className="baseline-note err">{baselineError}</div> : null}
           </div>
 
           <div className="status-endpoint">endpoints: {VIDEO_ENDPOINT} | {STATUS_ENDPOINT}</div>
