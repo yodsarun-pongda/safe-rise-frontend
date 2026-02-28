@@ -18,7 +18,6 @@ const BACKEND_BASE_URL = (import.meta.env.VITE_BACKEND_BASE_URL ?? "").trim().re
 const API_BASE_PATH = BACKEND_BASE_URL ? `${BACKEND_BASE_URL}/api` : "/api";
 const STATUS_ENDPOINT = `${API_BASE_PATH}/status`;
 const VIDEO_ENDPOINT = `${API_BASE_PATH}/video`;
-const SOURCE_ENDPOINT = `${API_BASE_PATH}/source`;
 const REFERENCE_LINE_ENDPOINT = `${API_BASE_PATH}/reference-line`;
 const REFERENCE_BASELINE_ENDPOINT = `${API_BASE_PATH}/reference-baseline`;
 const BACKEND_TARGET = BACKEND_BASE_URL || "same-origin (/api)";
@@ -232,67 +231,6 @@ export default function App() {
     }
   };
 
-  const loadSourceConfig = async () => {
-    try {
-      setSourceError("");
-      const res = await fetch(SOURCE_ENDPOINT);
-      if (!res.ok) throw new Error(`source HTTP ${res.status}`);
-
-      const data = (await res.json()) as Record<string, unknown>;
-      applySourceConfig(data);
-    } catch (err) {
-      setSourceError(err instanceof Error ? err.message : "Failed to load source config");
-    }
-  };
-
-  const toggleSourceMode = async () => {
-    if (sourceBusy) return;
-
-    const currentMode = sourceMode === "unknown" ? "camera" : sourceMode;
-    const nextMode: SourceMode = currentMode === "camera" ? "video" : "camera";
-    const nextIsCamera = nextMode === "camera";
-    const nextVideoPath = sourceVideoPath.trim() || "mock-video";
-    const sourceForCamera = Number(sourceConfigValue);
-
-    const payload = {
-      source: nextIsCamera
-        ? Number.isFinite(sourceForCamera)
-          ? sourceForCamera
-          : sourceConfigValue
-        : nextVideoPath,
-      is_camera_stream: nextIsCamera,
-      local_video_source: nextVideoPath,
-    };
-
-    try {
-      setSourceBusy(true);
-      setSourceError("");
-
-      const res = await fetch(SOURCE_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`source HTTP ${res.status}`);
-
-      try {
-        const data = (await res.json()) as Record<string, unknown>;
-        applySourceConfig(data);
-      } catch {
-        setSourceMode(nextMode);
-      }
-
-      setStatusText((prev) => `${prev} | source=${nextMode}`);
-      if (systemEnabled) {
-        setStreamVersion((prev) => prev + 1);
-      }
-    } catch (err) {
-      setSourceError(err instanceof Error ? err.message : "Failed to update source");
-    } finally {
-      setSourceBusy(false);
-    }
-  };
-
   const loadBaselineConfig = async () => {
     try {
       setBaselineBusy(true);
@@ -431,7 +369,6 @@ export default function App() {
     setStatusText("System ON. Connecting to backend...");
     setStreamRetrying(false);
     setStreamVersion((prev) => prev + 1);
-    void loadSourceConfig();
   };
 
   const closeSystem = () => {
@@ -592,10 +529,6 @@ export default function App() {
   }, [systemEnabled]);
 
   useEffect(() => {
-    void loadSourceConfig();
-  }, []);
-
-  useEffect(() => {
     return () => {
       stopBeeping();
       clearStreamRetryTimer();
@@ -610,20 +543,6 @@ export default function App() {
     <div className={`wrap ${isAlerting ? "alerting" : ""}`}>
       <div className="top">
         <div className="brand">SafeRise Monitor</div>
-        <div className={`chip ${systemEnabled && connected ? "live" : systemEnabled ? "danger" : ""}`}>
-          {systemEnabled ? (
-            connected ? (
-              <>
-                <span className="live-dot" />
-                <span>Live status</span>
-              </>
-            ) : (
-              "Connecting"
-            )
-          ) : (
-            "System OFF"
-          )}
-        </div>
       </div>
 
       {backendUnavailable ? (
@@ -664,7 +583,21 @@ export default function App() {
         <div className="panel">
           <div className="head">
             <span>Realtime Stream</span>
-            <span className={`chip ${tone}`}>{posture.toUpperCase()}</span>
+            <div className={`chip ${systemEnabled && connected ? "live" : systemEnabled ? "danger" : ""}`}>
+              {systemEnabled ? (
+                connected ? (
+                  <>
+                    <span className="live-dot" />
+                    <span>Live status</span>
+                  </>
+                ) : (
+                  "Connecting"
+                )
+              ) : (
+                "System OFF"
+              )}
+            </div>
+            {/* <span className={`chip ${tone}`}>{posture.toUpperCase()}</span> */}
           </div>
 
           <div className="video-actions">
@@ -677,15 +610,6 @@ export default function App() {
             <button className={`btn ${alertEnabled ? "secondary" : "danger"}`} onClick={toggleAlertEnabled}>
               {alertEnabled ? "Disable Alert" : "Enable Alert"}
             </button>
-            <button className="btn secondary" onClick={() => void toggleSourceMode()} disabled={sourceBusy}>
-              {sourceBusy
-                ? "Switching Source..."
-                : sourceMode === "camera"
-                  ? "Switch to Video"
-                  : sourceMode === "video"
-                    ? "Switch to Camera"
-                    : "Toggle Source"}
-            </button>
           </div>
 
           <div className="system-states">
@@ -697,11 +621,6 @@ export default function App() {
             <div className="system-state">
               <span>Alert State</span>
               <span className={`state ${alertEnabled ? "live" : ""}`}>{alertEnabled ? "ENABLED" : "DISABLED"}</span>
-            </div>
-
-            <div className="system-state">
-              <span>Source Mode</span>
-              <span className={`state ${sourceMode !== "unknown" ? "live" : ""}`}>{sourceMode.toUpperCase()}</span>
             </div>
           </div>
 
