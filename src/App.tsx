@@ -12,11 +12,16 @@ type StatusPayload = {
 };
 
 type Tone = "" | "warn" | "danger";
-const BACKEND_BASE_URL = "http://127.0.0.1:8000";
-const STATUS_ENDPOINT = `${BACKEND_BASE_URL}/api/status`;
-const VIDEO_ENDPOINT = `${BACKEND_BASE_URL}/api/video`;
-const REFERENCE_LINE_ENDPOINT = `${BACKEND_BASE_URL}/api/reference-line`;
-const REFERENCE_BASELINE_ENDPOINT = `${BACKEND_BASE_URL}/api/reference-baseline`;
+type SourceMode = "camera" | "video" | "unknown";
+
+const BACKEND_BASE_URL = (import.meta.env.VITE_BACKEND_BASE_URL ?? "").trim().replace(/\/$/, "");
+const API_BASE_PATH = BACKEND_BASE_URL ? `${BACKEND_BASE_URL}/api` : "/api";
+const STATUS_ENDPOINT = `${API_BASE_PATH}/status`;
+const VIDEO_ENDPOINT = `${API_BASE_PATH}/video`;
+const SOURCE_ENDPOINT = `${API_BASE_PATH}/source`;
+const REFERENCE_LINE_ENDPOINT = `${API_BASE_PATH}/reference-line`;
+const REFERENCE_BASELINE_ENDPOINT = `${API_BASE_PATH}/reference-baseline`;
+const BACKEND_TARGET = BACKEND_BASE_URL || "same-origin (/api)";
 const STATUS_POLL_MS = 1000;
 const STREAM_RETRY_MS = 1200;
 
@@ -65,7 +70,7 @@ function fmtUpdatedAt(value: number | undefined) {
 }
 
 export default function App() {
-  const [posture, setPosture] = useState("unknown");
+  const [posture, setPosture] = useState("-");
   const [personCount, setPersonCount] = useState<string>("-");
   const [detScore, setDetScore] = useState("-");
   const [poseScore, setPoseScore] = useState("-");
@@ -90,6 +95,11 @@ export default function App() {
   const [baselineBusy, setBaselineBusy] = useState(false);
   const [baselineNotice, setBaselineNotice] = useState("");
   const [baselineError, setBaselineError] = useState("");
+  const [sourceMode, setSourceMode] = useState<SourceMode>("unknown");
+  const [sourceBusy, setSourceBusy] = useState(false);
+  const [sourceConfigValue, setSourceConfigValue] = useState<string>("0");
+  const [sourceVideoPath, setSourceVideoPath] = useState<string>("mock-video");
+  const [sourceError, setSourceError] = useState("");
 
   const lastAlertSeqRef = useRef(0);
   const lastAlertFingerprintRef = useRef("");
@@ -193,6 +203,93 @@ export default function App() {
     if (streamRetryTimerRef.current !== null) {
       window.clearTimeout(streamRetryTimerRef.current);
       streamRetryTimerRef.current = null;
+    }
+  };
+
+  const resolveSourceMode = (data: Record<string, unknown>): SourceMode => {
+    const isCameraStream = data.is_camera_stream;
+    if (typeof isCameraStream === "boolean") {
+      return isCameraStream ? "camera" : "video";
+    }
+
+    const mode = String(data.mode ?? data.source_mode ?? "").toLowerCase().trim();
+    if (mode.includes("camera")) return "camera";
+    if (mode.includes("video") || mode.includes("file") || mode.includes("local")) return "video";
+    return "unknown";
+  };
+
+  const applySourceConfig = (data: Record<string, unknown>) => {
+    const mode = resolveSourceMode(data);
+    const sourceValue = data.source ?? data.camera_source ?? data.current_source;
+    const localVideoSource = data.local_video_source ?? data.video_source;
+
+    setSourceMode(mode);
+    if (sourceValue !== undefined && sourceValue !== null) {
+      setSourceConfigValue(String(sourceValue));
+    }
+    if (localVideoSource !== undefined && localVideoSource !== null) {
+      setSourceVideoPath(String(localVideoSource));
+    }
+  };
+
+  const loadSourceConfig = async () => {
+    try {
+      setSourceError("");
+      const res = await fetch(SOURCE_ENDPOINT);
+      if (!res.ok) throw new Error(`source HTTP ${res.status}`);
+
+      const data = (await res.json()) as Record<string, unknown>;
+      applySourceConfig(data);
+    } catch (err) {
+      setSourceError(err instanceof Error ? err.message : "Failed to load source config");
+    }
+  };
+
+  const toggleSourceMode = async () => {
+    if (sourceBusy) return;
+
+    const currentMode = sourceMode === "unknown" ? "camera" : sourceMode;
+    const nextMode: SourceMode = currentMode === "camera" ? "video" : "camera";
+    const nextIsCamera = nextMode === "camera";
+    const nextVideoPath = sourceVideoPath.trim() || "mock-video";
+    const sourceForCamera = Number(sourceConfigValue);
+
+    const payload = {
+      source: nextIsCamera
+        ? Number.isFinite(sourceForCamera)
+          ? sourceForCamera
+          : sourceConfigValue
+        : nextVideoPath,
+      is_camera_stream: nextIsCamera,
+      local_video_source: nextVideoPath,
+    };
+
+    try {
+      setSourceBusy(true);
+      setSourceError("");
+
+      const res = await fetch(SOURCE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`source HTTP ${res.status}`);
+
+      try {
+        const data = (await res.json()) as Record<string, unknown>;
+        applySourceConfig(data);
+      } catch {
+        setSourceMode(nextMode);
+      }
+
+      setStatusText((prev) => `${prev} | source=${nextMode}`);
+      if (systemEnabled) {
+        setStreamVersion((prev) => prev + 1);
+      }
+    } catch (err) {
+      setSourceError(err instanceof Error ? err.message : "Failed to update source");
+    } finally {
+      setSourceBusy(false);
     }
   };
 
@@ -334,6 +431,7 @@ export default function App() {
     setStatusText("System ON. Connecting to backend...");
     setStreamRetrying(false);
     setStreamVersion((prev) => prev + 1);
+    void loadSourceConfig();
   };
 
   const closeSystem = () => {
@@ -474,7 +572,7 @@ export default function App() {
         setConnected(false);
         setBackendUnavailable(true);
         setAlertMessage("");
-        setStatusText(`Backend is unavailable. Please start server at ${BACKEND_BASE_URL}`);
+        setStatusText(`Backend is unavailable. Please start server at ${BACKEND_TARGET}`);
       }
     };
 
@@ -492,6 +590,10 @@ export default function App() {
     if (!systemEnabled) return;
     void loadBaselineConfig();
   }, [systemEnabled]);
+
+  useEffect(() => {
+    void loadSourceConfig();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -526,7 +628,7 @@ export default function App() {
 
       {backendUnavailable ? (
         <div className="backend-warning" role="alert">
-          Backend is unavailable. Please re-check backend server at {BACKEND_BASE_URL}
+          Backend is unavailable. Please re-check backend server at {BACKEND_TARGET}
         </div>
       ) : null}
 
@@ -575,6 +677,15 @@ export default function App() {
             <button className={`btn ${alertEnabled ? "secondary" : "danger"}`} onClick={toggleAlertEnabled}>
               {alertEnabled ? "Disable Alert" : "Enable Alert"}
             </button>
+            <button className="btn secondary" onClick={() => void toggleSourceMode()} disabled={sourceBusy}>
+              {sourceBusy
+                ? "Switching Source..."
+                : sourceMode === "camera"
+                  ? "Switch to Video"
+                  : sourceMode === "video"
+                    ? "Switch to Camera"
+                    : "Toggle Source"}
+            </button>
           </div>
 
           <div className="system-states">
@@ -587,8 +698,14 @@ export default function App() {
               <span>Alert State</span>
               <span className={`state ${alertEnabled ? "live" : ""}`}>{alertEnabled ? "ENABLED" : "DISABLED"}</span>
             </div>
+
+            <div className="system-state">
+              <span>Source Mode</span>
+              <span className={`state ${sourceMode !== "unknown" ? "live" : ""}`}>{sourceMode.toUpperCase()}</span>
+            </div>
           </div>
 
+          {sourceError ? <div className="stream-warning error">{sourceError}</div> : null}
           {streamRetrying ? <div className="stream-warning">Video interrupted. Reconnecting...</div> : null}
 
           {systemEnabled ? (
