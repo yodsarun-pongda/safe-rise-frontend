@@ -526,7 +526,7 @@ export default function App() {
 
       {backendUnavailable ? (
         <div className="backend-warning" role="alert">
-          Backend is unavailable. Please re-check backend server ที่ {BACKEND_BASE_URL}
+          Backend is unavailable. Please re-check backend server at {BACKEND_BASE_URL}
         </div>
       ) : null}
 
